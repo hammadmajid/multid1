@@ -2,37 +2,32 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "multid1",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-27"
-  // "compatibility_flags": [
-  //   "nodejs_compat"
-  // ],
-  // "vars": {
-  //   "MY_VAR": "my-variable"
-  // },
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "MY_KV_NAMESPACE",
-  //     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  //   }
-  // ],
-  // "r2_buckets": [
-  //   {
-  //     "binding": "MY_BUCKET",
-  //     "bucket_name": "my-bucket"
-  //   }
-  // ],
-  // "d1_databases": [
-  //   {
-  //     "binding": "MY_DB",
-  //     "database_name": "my-database",
-  //     "database_id": ""
-  //   }
-  // ],
-  // "ai": {
-  //   "binding": "AI"
-  // },
-  // "observability": {
-  //   "enabled": true,
-  //   "head_sampling_rate": 1
-  // }
+  "compatibility_date": "2026-07-27",
+  "d1_databases": [
+    {
+      "binding": "DB_USERS",
+      "database_name": "multid1-users",
+      "database_id": "00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "binding": "DB_CART",
+      "database_name": "multid1-cart",
+      "database_id": "00000000-0000-0000-0000-000000000002"
+    },
+    {
+      "binding": "DB_CATALOG",
+      "database_name": "multid1-catalog",
+      "database_id": "00000000-0000-0000-0000-000000000003"
+    },
+    {
+      "binding": "DB_ORDERS",
+      "database_name": "multid1-orders",
+      "database_id": "00000000-0000-0000-0000-000000000004"
+    },
+    {
+      "binding": "DB_REVIEWS",
+      "database_name": "multid1-reviews",
+      "database_id": "00000000-0000-0000-0000-000000000005"
+    }
+  ]
 }
