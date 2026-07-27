@@ -20,6 +20,14 @@ import * as cartSchema from './schema/cart'
 import * as catalogSchema from './schema/catalog'
 import * as ordersSchema from './schema/orders'
 import * as reviewsSchema from './schema/reviews'
+import { type OrderWithItems, type OrderDetails } from './schema/orders'
+import {
+  checkoutCartToOrder,
+  getOrderDetails,
+  getOrdersForUser,
+  getOrder,
+  createOrder,
+} from './orders'
 import { generateId } from '../utils/ulid'
 import { ReferentialIntegrityError } from './errors'
 
@@ -346,6 +354,36 @@ export class MultiD1Client {
       throw new ReferentialIntegrityError(`Cart with id '${cartId}' does not exist`)
     }
     await this.db.cart.delete(cartItems).where(eq(cartItems.cartId, cartId))
+  }
+
+  // --- ORDER OPERATIONS ---
+
+  async createOrder(data: {
+    id?: string
+    userId: string
+    items: Array<{ variantId: string; quantity: number; price: number }>
+    status?: string
+  }): Promise<OrderWithItems> {
+    return createOrder(this, data)
+  }
+
+  async getOrder(id: string): Promise<OrderWithItems | null> {
+    return getOrder(this, id)
+  }
+
+  async checkoutCartToOrder(
+    cartIdOrData: string | { cartId: string; userId?: string },
+    userId?: string
+  ): Promise<OrderWithItems> {
+    return checkoutCartToOrder(this, cartIdOrData, userId)
+  }
+
+  async getOrderDetails(orderId: string): Promise<OrderDetails | null> {
+    return getOrderDetails(this, orderId)
+  }
+
+  async getOrdersForUser(userId: string): Promise<OrderWithItems[]> {
+    return getOrdersForUser(this, userId)
   }
 
 }
