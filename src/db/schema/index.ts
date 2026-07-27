@@ -1,6 +1,7 @@
 export * from './users'
 export * from './catalog'
 export * from './cart'
+export * from './orders'
 export * as usersSchema from './users'
 export * as cartSchema from './cart'
 export * as catalogSchema from './catalog'

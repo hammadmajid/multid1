@@ -1,6 +1,6 @@
 import { ulid } from 'ulid'
 
-export type IdPrefix = 'usr' | 'ses' | 'prd' | 'var' | 'crt' | 'cit' | 'ord' | 'rev'
+export type IdPrefix = 'usr' | 'ses' | 'prd' | 'var' | 'crt' | 'cit' | 'ord' | 'ori' | 'rev'
 
 export const ID_PREFIXES = {
   USER: 'usr',
@@ -10,6 +10,7 @@ export const ID_PREFIXES = {
   CART: 'crt',
   CART_ITEM: 'cit',
   ORDER: 'ord',
+  ORDER_ITEM: 'ori',
   REVIEW: 'rev',
 } as const
 
@@ -38,6 +39,9 @@ export function generateCartId(): `crt_${string}` {
 }
 export function generateCartItemId(): `cit_${string}` {
   return generateId('cit')
+}
+export function generateOrderItemId(): `ori_${string}` {
+  return generateId('ori')
 }
 
 
