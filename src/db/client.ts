@@ -37,6 +37,7 @@ import {
 } from './reviews'
 import { generateId } from '../utils/ulid'
 import { ReferentialIntegrityError } from './errors'
+import { auditSystemIntegrity, type AuditResult } from './audit'
 
 export interface Env {
   DB_USERS: D1Database
@@ -406,6 +407,12 @@ export class MultiD1Client {
 
   async getReviewsForProduct(productId: string): Promise<ReviewWithDetails[]> {
     return getReviewsForProduct(this, productId)
+  }
+
+  // --- AUDIT OPERATIONS ---
+
+  async auditSystemIntegrity(): Promise<AuditResult> {
+    return auditSystemIntegrity(this)
   }
 }
 
