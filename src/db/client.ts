@@ -2,6 +2,13 @@ import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'
 import { eq } from 'drizzle-orm'
 import * as usersSchema from './schema/users'
 import { users, userSessions, type User, type UserSession } from './schema/users'
+import {
+  products,
+  productVariants,
+  type Product,
+  type ProductVariant,
+  type ProductWithVariants,
+} from './schema/catalog'
 import * as cartSchema from './schema/cart'
 import * as catalogSchema from './schema/catalog'
 import * as ordersSchema from './schema/orders'
@@ -116,6 +123,100 @@ export class MultiD1Client {
       .where(eq(userSessions.token, idOrToken))
       .get()
     return byToken ?? null
+  }
+  // --- CATALOG & VARIANT OPERATIONS ---
+
+  async createProduct(data: {
+    id?: string
+    name: string
+    description?: string | null
+    price: number
+    sku?: string | null
+  }): Promise<Product> {
+    const id = data.id ?? generateId('prd')
+    const now = new Date()
+    const newProduct = {
+      id,
+      name: data.name,
+      description: data.description ?? null,
+      price: data.price,
+      sku: data.sku ?? null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.db.catalog.insert(products).values(newProduct)
+    const created = await this.getProduct(id)
+    if (!created) {
+      throw new Error(`Failed to retrieve created product ${id}`)
+    }
+    return created
+  }
+
+  async getProduct(id: string): Promise<Product | null> {
+    const result = await this.db.catalog
+      .select()
+      .from(products)
+      .where(eq(products.id, id))
+      .get()
+    return result ?? null
+  }
+
+  async createVariant(data: {
+    id?: string
+    productId: string
+    name: string
+    sku?: string | null
+    price?: number | null
+    stock?: number
+  }): Promise<ProductVariant> {
+    const product = await this.getProduct(data.productId)
+    if (!product) {
+      throw new ReferentialIntegrityError(`Product with id '${data.productId}' does not exist`)
+    }
+
+    const id = data.id ?? generateId('var')
+    const now = new Date()
+    const newVariant = {
+      id,
+      productId: data.productId,
+      name: data.name,
+      sku: data.sku ?? null,
+      price: data.price ?? null,
+      stock: data.stock ?? 0,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.db.catalog.insert(productVariants).values(newVariant)
+    const created = await this.getVariant(id)
+    if (!created) {
+      throw new Error(`Failed to retrieve created product variant ${id}`)
+    }
+    return created
+  }
+
+  async getVariant(id: string): Promise<ProductVariant | null> {
+    const result = await this.db.catalog
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, id))
+      .get()
+    return result ?? null
+  }
+
+  async getProductWithVariants(productId: string): Promise<ProductWithVariants | null> {
+    const product = await this.getProduct(productId)
+    if (!product) return null
+
+    const variants = await this.db.catalog
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.productId, productId))
+      .all()
+
+    return {
+      ...product,
+      variants,
+    }
   }
 }
 
