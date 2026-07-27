@@ -1,5 +1,5 @@
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1'
-import { eq } from 'drizzle-orm'
+import { eq, and } from 'drizzle-orm'
 import * as usersSchema from './schema/users'
 import { users, userSessions, type User, type UserSession } from './schema/users'
 import {
@@ -9,6 +9,13 @@ import {
   type ProductVariant,
   type ProductWithVariants,
 } from './schema/catalog'
+import {
+  carts,
+  cartItems,
+  type Cart,
+  type CartItem,
+  type CartWithItems,
+} from './schema/cart'
 import * as cartSchema from './schema/cart'
 import * as catalogSchema from './schema/catalog'
 import * as ordersSchema from './schema/orders'
@@ -218,6 +225,129 @@ export class MultiD1Client {
       variants,
     }
   }
+  // --- CART OPERATIONS ---
+
+  async createCart(data?: { id?: string; userId?: string | null }): Promise<Cart> {
+    if (data?.userId) {
+      const user = await this.getUser(data.userId)
+      if (!user) {
+        throw new ReferentialIntegrityError(`User with id '${data.userId}' does not exist`)
+      }
+    }
+
+    const id = data?.id ?? generateId('crt')
+    const now = new Date()
+    const newCart = {
+      id,
+      userId: data?.userId ?? null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.db.cart.insert(carts).values(newCart)
+    const created = await this.getCart(id)
+    if (!created) {
+      throw new Error(`Failed to retrieve created cart ${id}`)
+    }
+    return created
+  }
+
+  async getCart(id: string): Promise<Cart | null> {
+    const result = await this.db.cart
+      .select()
+      .from(carts)
+      .where(eq(carts.id, id))
+      .get()
+    return result ?? null
+  }
+
+  async getCartItem(id: string): Promise<CartItem | null> {
+    const result = await this.db.cart
+      .select()
+      .from(cartItems)
+      .where(eq(cartItems.id, id))
+      .get()
+    return result ?? null
+  }
+
+  async addItemToCart(data: {
+    id?: string
+    cartId: string
+    variantId: string
+    quantity?: number
+  }): Promise<CartItem> {
+    const cart = await this.getCart(data.cartId)
+    if (!cart) {
+      throw new ReferentialIntegrityError(`Cart with id '${data.cartId}' does not exist`)
+    }
+
+    const variant = await this.getVariant(data.variantId)
+    if (!variant) {
+      throw new ReferentialIntegrityError(`Product variant with id '${data.variantId}' does not exist`)
+    }
+
+    const qty = data.quantity ?? 1
+    const existingItem = await this.db.cart
+      .select()
+      .from(cartItems)
+      .where(and(eq(cartItems.cartId, data.cartId), eq(cartItems.variantId, data.variantId)))
+      .get()
+
+    if (existingItem && !data.id) {
+      const updatedQuantity = existingItem.quantity + qty
+      const now = new Date()
+      await this.db.cart
+        .update(cartItems)
+        .set({ quantity: updatedQuantity, updatedAt: now })
+        .where(eq(cartItems.id, existingItem.id))
+      const updated = await this.getCartItem(existingItem.id)
+      if (!updated) {
+        throw new Error(`Failed to retrieve updated cart item ${existingItem.id}`)
+      }
+      return updated
+    }
+
+    const id = data.id ?? generateId('cit')
+    const now = new Date()
+    const newItem = {
+      id,
+      cartId: data.cartId,
+      variantId: data.variantId,
+      quantity: qty,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.db.cart.insert(cartItems).values(newItem)
+    const created = await this.getCartItem(id)
+    if (!created) {
+      throw new Error(`Failed to retrieve created cart item ${id}`)
+    }
+    return created
+  }
+
+  async getCartWithItems(cartId: string): Promise<CartWithItems | null> {
+    const cart = await this.getCart(cartId)
+    if (!cart) return null
+
+    const items = await this.db.cart
+      .select()
+      .from(cartItems)
+      .where(eq(cartItems.cartId, cartId))
+      .all()
+
+    return {
+      ...cart,
+      items,
+    }
+  }
+
+  async clearCart(cartId: string): Promise<void> {
+    const cart = await this.getCart(cartId)
+    if (!cart) {
+      throw new ReferentialIntegrityError(`Cart with id '${cartId}' does not exist`)
+    }
+    await this.db.cart.delete(cartItems).where(eq(cartItems.cartId, cartId))
+  }
+
 }
 
 export function createMultiD1Client(env: Env): MultiD1Client {
