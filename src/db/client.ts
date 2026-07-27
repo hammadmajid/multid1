@@ -21,6 +21,7 @@ import * as catalogSchema from './schema/catalog'
 import * as ordersSchema from './schema/orders'
 import * as reviewsSchema from './schema/reviews'
 import { type OrderWithItems, type OrderDetails } from './schema/orders'
+import { type Review, type ReviewWithDetails } from './schema/reviews'
 import {
   checkoutCartToOrder,
   getOrderDetails,
@@ -28,6 +29,12 @@ import {
   getOrder,
   createOrder,
 } from './orders'
+import {
+  createReview,
+  getReview,
+  getReviewsForProduct,
+  type CreateReviewData,
+} from './reviews'
 import { generateId } from '../utils/ulid'
 import { ReferentialIntegrityError } from './errors'
 
@@ -386,6 +393,20 @@ export class MultiD1Client {
     return getOrdersForUser(this, userId)
   }
 
+
+  // --- REVIEW OPERATIONS ---
+
+  async createReview(data: CreateReviewData): Promise<Review> {
+    return createReview(this, data)
+  }
+
+  async getReview(id: string): Promise<Review | null> {
+    return getReview(this, id)
+  }
+
+  async getReviewsForProduct(productId: string): Promise<ReviewWithDetails[]> {
+    return getReviewsForProduct(this, productId)
+  }
 }
 
 export function createMultiD1Client(env: Env): MultiD1Client {
