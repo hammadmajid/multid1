@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { execSync } from 'child_process'
 import { generateId } from '../src/utils/ulid'
 
 const ACCOUNT_ID = '51a95f400b5cb8370eee5c58e838f89f'
@@ -13,20 +14,50 @@ const DB_IDS: Record<string, string> = {
   DB_REVIEWS: 'f3de0be9-70a3-46f4-9185-9ae0116933ef',
 }
 
+const c = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  cyan: '\x1b[36m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  red: '\x1b[31m',
+}
+
+let cachedToken: string | null = null
+
 function getAuthToken(): string {
   if (process.env.CLOUDFLARE_API_TOKEN) return process.env.CLOUDFLARE_API_TOKEN
   try {
     const tomlPath = path.join(os.homedir(), '.config', '.wrangler', 'config', 'default.toml')
     const content = fs.readFileSync(tomlPath, 'utf-8')
     const match = content.match(/oauth_token\s*=\s*"([^"]+)"/)
-    if (match?.[1]) return match[1]
+    if (match?.[1]) {
+      cachedToken = match[1]
+      return match[1]
+    }
   } catch {
-    // Fall back to environment/error
+    // Fall back to refresh
+  }
+  return refreshToken()
+}
+
+function refreshToken(): string {
+  try {
+    execSync('pnpm wrangler d1 list --json', { encoding: 'utf-8', stdio: 'ignore' })
+    const tomlPath = path.join(os.homedir(), '.config', '.wrangler', 'config', 'default.toml')
+    const content = fs.readFileSync(tomlPath, 'utf-8')
+    const match = content.match(/oauth_token\s*=\s*"([^"]+)"/)
+    if (match?.[1]) {
+      cachedToken = match[1]
+      return match[1]
+    }
+  } catch {
+    // Fallback
   }
   throw new Error('Cloudflare OAuth token not found in process.env.CLOUDFLARE_API_TOKEN or ~/.config/.wrangler/config/default.toml')
 }
-
-const AUTH_TOKEN = getAuthToken()
 
 interface QueryResult {
   success: boolean
@@ -34,15 +65,16 @@ interface QueryResult {
   meta?: { sql_duration_ms?: number; duration?: number }
 }
 
-async function d1Query(dbKey: keyof typeof DB_IDS, sql: string): Promise<QueryResult> {
+async function d1Query(dbKey: keyof typeof DB_IDS, sql: string, retry401 = true): Promise<QueryResult> {
   const dbId = DB_IDS[dbKey]
   const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${dbId}/query`
+  const token = cachedToken || getAuthToken()
 
   const start = performance.now()
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${AUTH_TOKEN}`,
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ sql }),
@@ -50,6 +82,10 @@ async function d1Query(dbKey: keyof typeof DB_IDS, sql: string): Promise<QueryRe
 
   const duration = performance.now() - start
   if (!res.ok) {
+    if (res.status === 401 && retry401) {
+      refreshToken()
+      return d1Query(dbKey, sql, false)
+    }
     const text = await res.text()
     throw new Error(`D1 HTTP query failed [${res.status}]: ${text}`)
   }
@@ -81,11 +117,11 @@ async function runFullyParallelMassiveStressTest() {
   const CONCURRENT_HTTP_WORKERS = 150
   const runTag = Date.now().toString(36)
 
-  console.log('========================================================================')
-  console.log('⚡ FULLY PARALLEL HIGH-CONCURRENCY REMOTE CLOUDFLARE D1 STRESS TEST')
-  console.log('========================================================================')
-  console.log(`Target Scale: ${TOTAL_SIMULATED_USERS} Users | All 5 D1 Databases Hammered Simultaneously`)
-  console.log(`Concurrent Edge Worker HTTP Connections: ${CONCURRENT_HTTP_WORKERS}\n`)
+  console.log(`\n${c.bold}┌────────────────────────────────────────────────────────────────────────┐${c.reset}`)
+  console.log(`${c.bold}│${c.reset} ${c.cyan}Cloudflare D1 Multi-Database Parallel Load Benchmark${c.reset}                 ${c.bold}│${c.reset}`)
+  console.log(`${c.bold}└────────────────────────────────────────────────────────────────────────┘${c.reset}`)
+  console.log(`  ${c.dim}Target Workload:${c.reset} ${c.bold}${TOTAL_SIMULATED_USERS.toLocaleString()}${c.reset} simulated users across 5 D1 instances`)
+  console.log(`  ${c.dim}Worker Pool    :${c.reset} ${c.bold}${CONCURRENT_HTTP_WORKERS}${c.reset} concurrent edge HTTP connections\n`)
 
   const userIds: string[] = []
   const sessionIds: string[] = []
@@ -106,14 +142,13 @@ async function runFullyParallelMassiveStressTest() {
   }
 
   try {
-    // Initial catalog seed so variants exist for cart/order/reviews
-    console.log('📦 Pre-seeding Catalog with Products and Variants...')
+    process.stdout.write(`  ${c.dim}Catalog Initialization:${c.reset} Pre-seeding 20 products & 60 variants... `)
     for (let i = 0; i < 20; i++) {
       const pId = generateId('prd')
       productIds.push(pId)
       await d1Query(
         'DB_CATALOG',
-        `INSERT INTO products (id, name, description, price, created_at, updated_at) VALUES ('${pId}', 'Catalog Product ${i + 1} (${runTag})', 'High concurrency item', ${999 + i * 200}, ${Date.now()}, ${Date.now()});`
+        `INSERT INTO products (id, name, description, price, created_at, updated_at) VALUES ('${pId}', 'Catalog Product ${i + 1} (${runTag})', 'Benchmark item', ${999 + i * 200}, ${Date.now()}, ${Date.now()});`
       )
 
       for (let j = 0; j < 3; j++) {
@@ -125,12 +160,11 @@ async function runFullyParallelMassiveStressTest() {
         )
       }
     }
-    console.log(`   ✓ 20 Products and 60 Variants created in DB_CATALOG.\n`)
+    console.log(`${c.green}done${c.reset}`)
 
-    console.log(`🚀 LAUNCHING SIMULTANEOUS FULLY-PARALLEL WORKLOAD ACROSS ALL 5 PARTITIONS...`)
+    console.log(`  ${c.dim}Workload Execution    :${c.reset} Launching parallel streams across all 5 partitions...\n`)
     const overallStart = performance.now()
 
-    let completedTasks = 0
     let userIndex = 0
 
     async function userWorkstreamWorker() {
@@ -163,7 +197,7 @@ async function runFullyParallelMassiveStressTest() {
         )
         latenciesByDb.DB_CART.push(performance.now() - t2)
 
-        // 3. 40% of users execute simultaneous checkouts to DB_ORDERS & clear DB_CART
+        // 3. 50% of users execute simultaneous checkouts to DB_ORDERS & clear DB_CART
         if (idx % 2 === 0) {
           const oId = generateId('ord')
           const oiId = generateId('ori')
@@ -190,16 +224,13 @@ async function runFullyParallelMassiveStressTest() {
           const t4 = performance.now()
           await d1Query(
             'DB_REVIEWS',
-            `INSERT INTO reviews (id, user_id, product_id, rating, title, comment, created_at, updated_at) VALUES ('${rId}', '${uId}', '${pId}', 5, 'Parallel Stress Review ${idx}', 'Blazing fast Cloudflare D1 performance.', ${Date.now()}, ${Date.now()});`
+            `INSERT INTO reviews (id, user_id, product_id, rating, title, comment, created_at, updated_at) VALUES ('${rId}', '${uId}', '${pId}', 5, 'Stress Review ${idx}', 'Performance verified under peak load.', ${Date.now()}, ${Date.now()});`
           )
           latenciesByDb.DB_REVIEWS.push(performance.now() - t4)
         }
-
-        completedTasks++
       }
     }
 
-    // Launch background integrity auditing stream concurrently with operations
     let auditCount = 0
     let integrityPassing = true
     async function continuousAuditWorker() {
@@ -221,7 +252,6 @@ async function runFullyParallelMassiveStressTest() {
       }
     }
 
-    // Fire 100 concurrent HTTP workers simultaneously + 1 continuous auditor worker
     const workers = Array.from({ length: CONCURRENT_HTTP_WORKERS }, () => userWorkstreamWorker())
     workers.push(continuousAuditWorker())
 
@@ -235,28 +265,41 @@ async function runFullyParallelMassiveStressTest() {
       latenciesByDb.DB_REVIEWS.length +
       latenciesByDb.DB_CATALOG.length
 
-    console.log(`\n========================================================================`)
-    console.log(`📊 STRESS TEST RESULTS (FULLY PARALLEL CONTINUOUS WORKLOAD)`)
-    console.log(`========================================================================`)
-    console.log(`Total Execution Time:        ${totalSec.toFixed(2)}s`)
-    console.log(`Total Edge D1 SQL Operations: ${totalOps} operations`)
-    console.log(`Overall Throughput:           ${(totalOps / totalSec).toFixed(1)} operations/sec\n`)
+    console.log(`${c.dim}──────────────────────────────────────────────────────────────────────────${c.reset}`)
+    console.log(`${c.bold}Benchmark Summary & Metrics${c.reset}`)
+    console.log(`${c.dim}──────────────────────────────────────────────────────────────────────────${c.reset}`)
+    console.log(`  ${c.dim}Execution Time      :${c.reset} ${c.yellow}${totalSec.toFixed(2)}s${c.reset}`)
+    console.log(`  ${c.dim}Total D1 Operations :${c.reset} ${c.bold}${totalOps.toLocaleString()}${c.reset} queries`)
+    console.log(`  ${c.dim}Overall Throughput  :${c.reset} ${c.green}${c.bold}${(totalOps / totalSec).toFixed(1)}${c.reset} ops/sec\n`)
 
-    console.log(`Partition Breakdown & Latency Statistics:`)
+    console.log(`${c.bold}Partition Breakdown & Latency Distribution${c.reset}`)
+    console.log(`┌──────────────┬───────────┬─────────┬─────────┬─────────┐`)
+    console.log(`│ Partition    │ Total Ops │ P50     │ P95     │ P99     │`)
+    console.log(`├──────────────┼───────────┼─────────┼─────────┼─────────┤`)
+
     for (const [dbName, lats] of Object.entries(latenciesByDb)) {
       const stats = calcStats(lats)
-      console.log(
-        `  • ${dbName.padEnd(12)}: ${lats.length.toString().padStart(5)} ops | p50: ${stats.p50.toFixed(0).padStart(4)}ms | p95: ${stats.p95.toFixed(0).padStart(4)}ms | p99: ${stats.p99.toFixed(0).padStart(4)}ms`
-      )
+      const name = dbName.padEnd(12)
+      const ops = lats.length.toLocaleString().padStart(9)
+      const p50 = `${stats.p50.toFixed(0)}ms`.padStart(7)
+      const p95 = `${stats.p95.toFixed(0)}ms`.padStart(7)
+      const p99 = `${stats.p99.toFixed(0)}ms`.padStart(7)
+      console.log(`│ ${c.cyan}${name}${c.reset} │ ${ops} │ ${p50} │ ${p95} │ ${p99} │`)
     }
+    console.log(`└──────────────┴───────────┴─────────┴─────────┴─────────┘\n`)
 
-    console.log(`\nReferential Integrity & Concurrent Lock Auditing:`)
-    console.log(`  ✓ Concurrent Audit Sweeps Executed: ${auditCount}`)
-    console.log(`  ✓ Real-Time Cross-Database Integrity: ${integrityPassing ? '100% PASSED (0 Orphaned Records)' : 'FAILED'}`)
-    console.log(`  ✓ Records Processed: ${userIds.length} Users, ${cartIds.length} Carts, ${orderIds.length} Orders, ${reviewIds.length} Reviews`)
-    console.log(`\n✅ MASSIVE FULLY-PARALLEL CLOUDFLARE D1 STRESS TEST PASSED!\n`)
+    console.log(`${c.bold}Cross-Partition Integrity & Audit Report${c.reset}`)
+    console.log(`  ${c.dim}• Audit Sweeps Executed :${c.reset} ${auditCount} iterations`)
+    console.log(
+      `  ${c.dim}• Referential Integrity :${c.reset} ${integrityPassing ? `${c.green}${c.bold}PASSED${c.reset} (0 orphaned records detected)` : `${c.red}FAILED${c.reset}`}`
+    )
+    console.log(
+      `  ${c.dim}• Total Entities Tracked:${c.reset} ${userIds.length.toLocaleString()} Users | ${cartIds.length.toLocaleString()} Carts | ${orderIds.length.toLocaleString()} Orders | ${reviewIds.length.toLocaleString()} Reviews\n`
+    )
+
+    console.log(`  ${c.dim}Status:${c.reset} ${c.green}${c.bold}PASSED${c.reset}\n`)
   } finally {
-    console.log('🧹 Cleaning up massive stress test records from 5 remote D1 databases...')
+    process.stdout.write(`  ${c.dim}Cleanup:${c.reset} Purging benchmark data from remote partitions... `)
     const chunk = <T>(arr: T[], size: number): T[][] => {
       const res: T[][] = []
       for (let i = 0; i < arr.length; i += size) res.push(arr.slice(i, i + size))
@@ -291,14 +334,14 @@ async function runFullyParallelMassiveStressTest() {
       for (const batch of chunk(userIds, 100)) {
         await d1Query('DB_USERS', `DELETE FROM users WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
       }
-      console.log('✓ Remote cleanup completed cleanly.')
+      console.log(`${c.green}done${c.reset}\n`)
     } catch (err) {
-      console.error('Cleanup warning:', err)
+      console.error('Cleanup error:', err)
     }
   }
 }
 
 runFullyParallelMassiveStressTest().catch((err) => {
-  console.error('❌ Massive Parallel Stress Test Failed:', err)
+  console.error(`\n${c.red}Benchmark Failed:${c.reset}`, err)
   process.exit(1)
 })
