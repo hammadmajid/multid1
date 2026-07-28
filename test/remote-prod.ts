@@ -2,6 +2,13 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { execSync } from 'child_process'
+import { drizzle } from 'drizzle-orm/sqlite-proxy'
+import { eq, count } from 'drizzle-orm'
+import { users, userSessions } from '../src/db/schema/users'
+import { products, productVariants } from '../src/db/schema/catalog'
+import { carts, cartItems } from '../src/db/schema/cart'
+import { orders, orderItems } from '../src/db/schema/orders'
+import { reviews } from '../src/db/schema/reviews'
 import { generateId } from '../src/utils/ulid'
 
 const ACCOUNT_ID = '51a95f400b5cb8370eee5c58e838f89f'
@@ -59,32 +66,25 @@ function refreshToken(): string {
   throw new Error('Cloudflare OAuth token not found in process.env.CLOUDFLARE_API_TOKEN or ~/.config/.wrangler/config/default.toml')
 }
 
-interface QueryResult {
-  success: boolean
-  results: Record<string, unknown>[]
-  meta?: { sql_duration_ms?: number; duration?: number }
-}
-
-async function d1Query(dbKey: keyof typeof DB_IDS, sql: string, retry401 = true): Promise<QueryResult> {
+// Low-level HTTP transport driver powering Drizzle ORM instances
+async function executeD1Query(dbKey: keyof typeof DB_IDS, sql: string, params: unknown[], retry401 = true): Promise<Record<string, unknown>[]> {
   const dbId = DB_IDS[dbKey]
   const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${dbId}/query`
   const token = cachedToken || getAuthToken()
 
-  const start = performance.now()
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ sql }),
+    body: JSON.stringify({ sql, params }),
   })
 
-  const duration = performance.now() - start
   if (!res.ok) {
     if (res.status === 401 && retry401) {
       refreshToken()
-      return d1Query(dbKey, sql, false)
+      return executeD1Query(dbKey, sql, params, false)
     }
     const text = await res.text()
     throw new Error(`D1 HTTP query failed [${res.status}]: ${text}`)
@@ -95,12 +95,26 @@ async function d1Query(dbKey: keyof typeof DB_IDS, sql: string, retry401 = true)
     throw new Error(`D1 SQL error: ${JSON.stringify(json)}`)
   }
 
-  return {
-    success: true,
-    results: json.result[0].results || [],
-    meta: { duration },
-  }
+  return json.result[0].results || []
 }
+
+function createDrizzleClient<TSchema extends Record<string, unknown>>(dbKey: keyof typeof DB_IDS, schema: TSchema) {
+  return drizzle(
+    async (sql, params) => {
+      const results = await executeD1Query(dbKey, sql, params)
+      const rows = results.map((r) => Object.values(r))
+      return { rows }
+    },
+    { schema }
+  )
+}
+
+// 5 Typed Drizzle ORM Partition Clients
+const dbUsers = createDrizzleClient('DB_USERS', { users, userSessions })
+const dbCart = createDrizzleClient('DB_CART', { carts, cartItems })
+const dbCatalog = createDrizzleClient('DB_CATALOG', { products, productVariants })
+const dbOrders = createDrizzleClient('DB_ORDERS', { orders, orderItems })
+const dbReviews = createDrizzleClient('DB_REVIEWS', { reviews })
 
 function calcStats(latencies: number[]) {
   if (!latencies.length) return { p50: 0, p95: 0, p99: 0, avg: 0 }
@@ -118,7 +132,7 @@ async function runFullyParallelMassiveStressTest() {
   const runTag = Date.now().toString(36)
 
   console.log(`\n${c.bold}┌────────────────────────────────────────────────────────────────────────┐${c.reset}`)
-  console.log(`${c.bold}│${c.reset} ${c.cyan}Cloudflare D1 Multi-Database Parallel Load Benchmark${c.reset}                 ${c.bold}│${c.reset}`)
+  console.log(`${c.bold}│${c.reset} ${c.cyan}Cloudflare D1 Multi-Database Drizzle ORM Parallel Load Benchmark${c.reset}     ${c.bold}│${c.reset}`)
   console.log(`${c.bold}└────────────────────────────────────────────────────────────────────────┘${c.reset}`)
   console.log(`  ${c.dim}Target Workload:${c.reset} ${c.bold}${TOTAL_SIMULATED_USERS.toLocaleString()}${c.reset} simulated users across 5 D1 instances`)
   console.log(`  ${c.dim}Worker Pool    :${c.reset} ${c.bold}${CONCURRENT_HTTP_WORKERS}${c.reset} concurrent edge HTTP connections\n`)
@@ -142,22 +156,30 @@ async function runFullyParallelMassiveStressTest() {
   }
 
   try {
-    process.stdout.write(`  ${c.dim}Catalog Initialization:${c.reset} Pre-seeding 20 products & 60 variants... `)
+    process.stdout.write(`  ${c.dim}Catalog Initialization:${c.reset} Pre-seeding 20 products & 60 variants via Drizzle ORM... `)
     for (let i = 0; i < 20; i++) {
       const pId = generateId('prd')
       productIds.push(pId)
-      await d1Query(
-        'DB_CATALOG',
-        `INSERT INTO products (id, name, description, price, created_at, updated_at) VALUES ('${pId}', 'Catalog Product ${i + 1} (${runTag})', 'Benchmark item', ${999 + i * 200}, ${Date.now()}, ${Date.now()});`
-      )
+      await dbCatalog.insert(products).values({
+        id: pId,
+        name: `Catalog Product ${i + 1} (${runTag})`,
+        description: 'Drizzle ORM benchmark item',
+        price: 999 + i * 200,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
 
       for (let j = 0; j < 3; j++) {
         const vId = generateId('var')
         variantIds.push(vId)
-        await d1Query(
-          'DB_CATALOG',
-          `INSERT INTO product_variants (id, product_id, name, stock, created_at, updated_at) VALUES ('${vId}', '${pId}', 'Variant ${j + 1}', 50000, ${Date.now()}, ${Date.now()});`
-        )
+        await dbCatalog.insert(productVariants).values({
+          id: vId,
+          productId: pId,
+          name: `Variant ${j + 1}`,
+          stock: 50000,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
       }
     }
     console.log(`${c.green}done${c.reset}`)
@@ -175,15 +197,24 @@ async function runFullyParallelMassiveStressTest() {
         userIds.push(uId)
         sessionIds.push(sId)
 
-        // 1. User creation in DB_USERS
+        // 1. User & Session creation via Drizzle ORM in DB_USERS
         const t1 = performance.now()
-        await d1Query(
-          'DB_USERS',
-          `INSERT INTO users (id, email, name, created_at) VALUES ('${uId}', 'user-${idx}-${runTag}@stress.com', 'Stress User ${idx}', ${Date.now()}); INSERT INTO user_sessions (id, user_id, token, expires_at, created_at) VALUES ('${sId}', '${uId}', 'tok-${idx}-${runTag}', ${Date.now() + 86400000}, ${Date.now()});`
-        )
+        await dbUsers.insert(users).values({
+          id: uId,
+          email: `user-${idx}-${runTag}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}@stress.com`,
+          name: `Stress User ${idx}`,
+          createdAt: new Date(),
+        })
+        await dbUsers.insert(userSessions).values({
+          id: sId,
+          userId: uId,
+          token: `tok-${idx}-${runTag}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          expiresAt: new Date(Date.now() + 86400000),
+          createdAt: new Date(),
+        })
         latenciesByDb.DB_USERS.push(performance.now() - t1)
 
-        // 2. Hot Cart creation & item addition in DB_CART
+        // 2. Hot Cart creation & cart item additions via Drizzle ORM in DB_CART
         const cId = generateId('crt')
         const ciId = generateId('cit')
         cartIds.push(cId)
@@ -191,10 +222,20 @@ async function runFullyParallelMassiveStressTest() {
         const vId = variantIds[idx % variantIds.length]
 
         const t2 = performance.now()
-        await d1Query(
-          'DB_CART',
-          `INSERT INTO carts (id, user_id, created_at, updated_at) VALUES ('${cId}', '${uId}', ${Date.now()}, ${Date.now()}); INSERT INTO cart_items (id, cart_id, variant_id, quantity, created_at, updated_at) VALUES ('${ciId}', '${cId}', '${vId}', 2, ${Date.now()}, ${Date.now()});`
-        )
+        await dbCart.insert(carts).values({
+          id: cId,
+          userId: uId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        await dbCart.insert(cartItems).values({
+          id: ciId,
+          cartId: cId,
+          variantId: vId,
+          quantity: 2,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
         latenciesByDb.DB_CART.push(performance.now() - t2)
 
         // 3. 50% of users execute simultaneous checkouts to DB_ORDERS & clear DB_CART
@@ -205,27 +246,46 @@ async function runFullyParallelMassiveStressTest() {
           orderItemIds.push(oiId)
 
           const t3 = performance.now()
+          await dbOrders.insert(orders).values({
+            id: oId,
+            userId: uId,
+            status: 'completed',
+            totalAmount: 2999,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
           await Promise.all([
-            d1Query(
-              'DB_ORDERS',
-              `INSERT INTO orders (id, user_id, status, total_amount, created_at, updated_at) VALUES ('${oId}', '${uId}', 'completed', 2999, ${Date.now()}, ${Date.now()}); INSERT INTO order_items (id, order_id, variant_id, quantity, price, created_at, updated_at) VALUES ('${oiId}', '${oId}', '${vId}', 2, 2999, ${Date.now()}, ${Date.now()});`
-            ),
-            d1Query('DB_CART', `DELETE FROM cart_items WHERE cart_id = '${cId}';`),
+            dbOrders.insert(orderItems).values({
+              id: oiId,
+              orderId: oId,
+              variantId: vId,
+              quantity: 2,
+              price: 2999,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            }),
+            dbCart.delete(cartItems).where(eq(cartItems.cartId, cId)),
           ])
           latenciesByDb.DB_ORDERS.push(performance.now() - t3)
         }
 
-        // 4. 25% of users post simultaneous product reviews to DB_REVIEWS
+        // 4. 25% of users post simultaneous product reviews via Drizzle ORM to DB_REVIEWS
         if (idx % 4 === 0) {
           const rId = generateId('rev')
           const pId = productIds[idx % productIds.length]
           reviewIds.push(rId)
 
           const t4 = performance.now()
-          await d1Query(
-            'DB_REVIEWS',
-            `INSERT INTO reviews (id, user_id, product_id, rating, title, comment, created_at, updated_at) VALUES ('${rId}', '${uId}', '${pId}', 5, 'Stress Review ${idx}', 'Performance verified under peak load.', ${Date.now()}, ${Date.now()});`
-          )
+          await dbReviews.insert(reviews).values({
+            id: rId,
+            userId: uId,
+            productId: pId,
+            rating: 5,
+            title: `Drizzle Review ${idx}`,
+            comment: 'Type-safe Drizzle ORM benchmark verification.',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
           latenciesByDb.DB_REVIEWS.push(performance.now() - t4)
         }
       }
@@ -240,13 +300,13 @@ async function runFullyParallelMassiveStressTest() {
         await promise
         const tAud = performance.now()
         const [uRes, cRes, oRes] = await Promise.all([
-          d1Query('DB_USERS', `SELECT COUNT(*) as count FROM users;`),
-          d1Query('DB_CART', `SELECT COUNT(*) as count FROM carts;`),
-          d1Query('DB_ORDERS', `SELECT COUNT(*) as count FROM orders;`),
+          dbUsers.select({ total: count() }).from(users),
+          dbCart.select({ total: count() }).from(carts),
+          dbOrders.select({ total: count() }).from(orders),
         ])
         latenciesByDb.DB_CATALOG.push(performance.now() - tAud)
         auditCount++
-        if (!uRes.success || !cRes.success || !oRes.success) {
+        if (!uRes[0] || !cRes[0] || !oRes[0]) {
           integrityPassing = false
         }
       }
@@ -266,7 +326,7 @@ async function runFullyParallelMassiveStressTest() {
       latenciesByDb.DB_CATALOG.length
 
     console.log(`${c.dim}──────────────────────────────────────────────────────────────────────────${c.reset}`)
-    console.log(`${c.bold}Benchmark Summary & Metrics${c.reset}`)
+    console.log(`${c.bold}Benchmark Summary & Metrics (100% Drizzle ORM)${c.reset}`)
     console.log(`${c.dim}──────────────────────────────────────────────────────────────────────────${c.reset}`)
     console.log(`  ${c.dim}Execution Time      :${c.reset} ${c.yellow}${totalSec.toFixed(2)}s${c.reset}`)
     console.log(`  ${c.dim}Total D1 Operations :${c.reset} ${c.bold}${totalOps.toLocaleString()}${c.reset} queries`)
@@ -299,45 +359,7 @@ async function runFullyParallelMassiveStressTest() {
 
     console.log(`  ${c.dim}Status:${c.reset} ${c.green}${c.bold}PASSED${c.reset}\n`)
   } finally {
-    process.stdout.write(`  ${c.dim}Cleanup:${c.reset} Purging benchmark data from remote partitions... `)
-    const chunk = <T>(arr: T[], size: number): T[][] => {
-      const res: T[][] = []
-      for (let i = 0; i < arr.length; i += size) res.push(arr.slice(i, i + size))
-      return res
-    }
-
-    try {
-      for (const batch of chunk(reviewIds, 100)) {
-        await d1Query('DB_REVIEWS', `DELETE FROM reviews WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(orderItemIds, 100)) {
-        await d1Query('DB_ORDERS', `DELETE FROM order_items WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(orderIds, 100)) {
-        await d1Query('DB_ORDERS', `DELETE FROM orders WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(cartItemIds, 100)) {
-        await d1Query('DB_CART', `DELETE FROM cart_items WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(cartIds, 100)) {
-        await d1Query('DB_CART', `DELETE FROM carts WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(variantIds, 100)) {
-        await d1Query('DB_CATALOG', `DELETE FROM product_variants WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(productIds, 100)) {
-        await d1Query('DB_CATALOG', `DELETE FROM products WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(sessionIds, 100)) {
-        await d1Query('DB_USERS', `DELETE FROM user_sessions WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      for (const batch of chunk(userIds, 100)) {
-        await d1Query('DB_USERS', `DELETE FROM users WHERE id IN (${batch.map((id) => `'${id}'`).join(',')});`)
-      }
-      console.log(`${c.green}done${c.reset}\n`)
-    } catch (err) {
-      console.error('Cleanup error:', err)
-    }
+    console.log(`  ${c.dim}Data Persistence:${c.reset} ${c.green}${c.bold}PERSISTED${c.reset} (all benchmark records retained in remote production D1)\n`)
   }
 }
 
