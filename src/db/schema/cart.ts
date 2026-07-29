@@ -36,19 +36,21 @@ export type CartWithItems = Cart & {
 }
 
 export const CREATE_CART_TABLES_SQL = `
+PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS carts (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY NOT NULL,
   user_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS cart_items (
-  id TEXT PRIMARY KEY,
-  cart_id TEXT NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY NOT NULL,
+  cart_id TEXT NOT NULL,
   variant_id TEXT NOT NULL,
-  quantity INTEGER NOT NULL DEFAULT 1,
+  quantity INTEGER DEFAULT 1 NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (cart_id) REFERENCES carts(id) ON UPDATE NO ACTION ON DELETE CASCADE
 );
 `

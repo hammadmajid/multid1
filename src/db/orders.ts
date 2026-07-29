@@ -43,63 +43,97 @@ export async function checkoutCartToOrder(
   let totalAmount = 0
   const itemsToInsert: Array<{ variantId: string; quantity: number; price: number }> = []
 
-  for (const item of cart.items) {
-    const variant = await client.getVariant(item.variantId)
-    if (!variant) {
-      throw new ReferentialIntegrityError(`Product variant with id '${item.variantId}' does not exist`)
+  const deductedStock: Array<{ variantId: string; previousStock: number; deductedQty: number }> = []
+
+  try {
+    for (const item of cart.items) {
+      const variant = await client.getVariant(item.variantId)
+      if (!variant) {
+        throw new ReferentialIntegrityError(`Product variant with id '${item.variantId}' does not exist`)
+      }
+
+      if (variant.stock < item.quantity) {
+        throw new Error(`Insufficient stock for variant '${item.variantId}'`)
+      }
+
+      let unitPrice = variant.price
+      if (unitPrice === null || unitPrice === undefined) {
+        const product = await client.getProduct(variant.productId)
+        unitPrice = product?.price ?? 0
+      }
+
+      // Deduct stock in DB_CATALOG
+      const now = new Date()
+      await client.db.catalog
+        .update(productVariants)
+        .set({ stock: variant.stock - item.quantity, updatedAt: now })
+        .where(eq(productVariants.id, item.variantId))
+
+      deductedStock.push({
+        variantId: item.variantId,
+        previousStock: variant.stock,
+        deductedQty: item.quantity,
+      })
+
+      totalAmount += unitPrice * item.quantity
+      itemsToInsert.push({
+        variantId: item.variantId,
+        quantity: item.quantity,
+        price: unitPrice,
+      })
     }
 
-    if (variant.stock < item.quantity) {
-      throw new Error(`Insufficient stock for variant '${item.variantId}'`)
-    }
+    const orderId = generateId('ord')
+    const now = new Date()
 
-    let unitPrice = variant.price
-    if (unitPrice === null || unitPrice === undefined) {
-      const product = await client.getProduct(variant.productId)
-      unitPrice = product?.price ?? 0
-    }
+    await client.db.orders.insert(orders).values({
+      id: orderId,
+      userId: finalUserId,
+      status: 'pending',
+      totalAmount,
+      createdAt: now,
+      updatedAt: now,
+    })
 
-    totalAmount += unitPrice * item.quantity
-    itemsToInsert.push({
+    const orderItemsToInsert: OrderItem[] = itemsToInsert.map((item) => ({
+      id: generateId('ori'),
+      orderId,
       variantId: item.variantId,
       quantity: item.quantity,
-      price: unitPrice,
-    })
-  }
+      price: item.price,
+      createdAt: now,
+      updatedAt: now,
+    }))
 
-  const orderId = generateId('ord')
-  const now = new Date()
+    await client.db.orders.insert(orderItems).values(orderItemsToInsert)
 
-  await client.db.orders.insert(orders).values({
-    id: orderId,
-    userId: finalUserId,
-    status: 'pending',
-    totalAmount,
-    createdAt: now,
-    updatedAt: now,
-  })
+    try {
+      await client.clearCart(cartId)
+    } catch (cartError) {
+      // Compensating transaction: roll back order creation in DB_ORDERS
+      await client.db.orders.delete(orderItems).where(eq(orderItems.orderId, orderId))
+      await client.db.orders.delete(orders).where(eq(orders.id, orderId))
+      throw cartError
+    }
 
-  const orderItemsToInsert: OrderItem[] = itemsToInsert.map((item) => ({
-    id: generateId('ori'),
-    orderId,
-    variantId: item.variantId,
-    quantity: item.quantity,
-    price: item.price,
-    createdAt: now,
-    updatedAt: now,
-  }))
-
-  await client.db.orders.insert(orderItems).values(orderItemsToInsert)
-  await client.clearCart(cartId)
-
-  return {
-    id: orderId,
-    userId: finalUserId,
-    status: 'pending',
-    totalAmount,
-    createdAt: now,
-    updatedAt: now,
-    items: orderItemsToInsert,
+    return {
+      id: orderId,
+      userId: finalUserId,
+      status: 'pending',
+      totalAmount,
+      createdAt: now,
+      updatedAt: now,
+      items: orderItemsToInsert,
+    }
+  } catch (error) {
+    // Restore stock if any step failed
+    for (const item of deductedStock) {
+      await client.db.catalog
+        .update(productVariants)
+        .set({ stock: item.previousStock, updatedAt: new Date() })
+        .where(eq(productVariants.id, item.variantId))
+    }
+    throw error
   }
 }
 

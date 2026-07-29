@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test'
 import { describe, it, expect, beforeEach } from 'vitest'
-import { createMultiD1Client, ReferentialIntegrityError, CREATE_CATALOG_TABLES_SQL } from '../src/db'
+import { createMultiD1Client, ReferentialIntegrityError, resetDatabases } from '../src/db'
 import { generateId, generateProductId, generateVariantId, isValidId } from '../src/utils/ulid'
 
 describe('Catalog Prefixed ULID Generator', () => {
@@ -17,13 +17,7 @@ describe('Catalog Prefixed ULID Generator', () => {
 
 describe('Catalog & Product Variant Slice (MultiD1Client)', () => {
   beforeEach(async () => {
-    // Initialize SQLite tables in DB_CATALOG binding
-    const statements = CREATE_CATALOG_TABLES_SQL.split(';')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    for (const stmt of statements) {
-      await env.DB_CATALOG.prepare(stmt).run()
-    }
+    await resetDatabases(env)
   })
 
   it('creates and retrieves a product', async () => {
@@ -145,5 +139,17 @@ describe('Catalog & Product Variant Slice (MultiD1Client)', () => {
         stock: 5,
       })
     ).rejects.toThrow(ReferentialIntegrityError)
+  })
+
+  it('enforces SQLite foreign key ON DELETE CASCADE when a product is deleted', async () => {
+    const client = createMultiD1Client(env)
+    const product = await client.createProduct({ name: 'Laptop', price: 99900 })
+    const variant = await client.createVariant({ productId: product.id, name: '16GB RAM', stock: 10 })
+
+    expect(await client.getVariant(variant.id)).not.toBeNull()
+
+    await env.DB_CATALOG.prepare('DELETE FROM products WHERE id = ?').bind(product.id).run()
+
+    expect(await client.getVariant(variant.id)).toBeNull()
   })
 })

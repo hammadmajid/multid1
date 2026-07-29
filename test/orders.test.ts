@@ -3,10 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   createMultiD1Client,
   ReferentialIntegrityError,
-  CREATE_USERS_TABLES_SQL,
-  CREATE_CATALOG_TABLES_SQL,
-  CREATE_CART_TABLES_SQL,
-  CREATE_ORDERS_TABLES_SQL,
+  resetDatabases,
 } from '../src/db'
 import {
   generateOrderId,
@@ -28,21 +25,10 @@ describe('Order & Order Item Prefixed ULID Generator', () => {
 
 describe('Orders Database, Checkout Workflow & Cross-DB Joins (MultiD1Client)', () => {
   beforeEach(async () => {
-    for (const stmt of CREATE_USERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_USERS.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CATALOG_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CATALOG.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CART_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CART.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_ORDERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_ORDERS.prepare(stmt).run()
-    }
+    await resetDatabases(env)
   })
 
-  it('performs checkoutCartToOrder transaction and clears cart', async () => {
+  it('performs checkoutCartToOrder transaction, decrements variant stock, and clears cart', async () => {
     const client = createMultiD1Client(env)
     const user = await client.createUser({ email: 'buyer@example.com', name: 'Buyer' })
     const product = await client.createProduct({ name: 'Mechanical Keyboard', price: 15000 })
@@ -67,6 +53,12 @@ describe('Orders Database, Checkout Workflow & Cross-DB Joins (MultiD1Client)', 
       expect(isValidId(item.id, 'ori')).toBe(true)
       expect(item.orderId).toBe(order.id)
     }
+
+    // Verify variant stock in DB_CATALOG was decremented properly
+    const updatedV1 = await client.getVariant(v1.id)
+    const updatedV2 = await client.getVariant(v2.id)
+    expect(updatedV1?.stock).toBe(8)
+    expect(updatedV2?.stock).toBe(4)
 
     // Verify cart was cleared after checkout
     const cartAfter = await client.getCartWithItems(cart.id)
@@ -164,5 +156,50 @@ describe('Orders Database, Checkout Workflow & Cross-DB Joins (MultiD1Client)', 
     expect(userOrders.length).toBe(2)
     expect(userOrders[0].items.length).toBe(1)
     expect(userOrders[1].items.length).toBe(1)
+  })
+
+  it('restores variant stock when clearCart fails during checkout (saga compensation)', async () => {
+    const client = createMultiD1Client(env)
+    const user = await client.createUser({ email: 'rollback@example.com', name: 'Rollback User' })
+    const product = await client.createProduct({ name: 'Gadget', price: 5000 })
+    const variant = await client.createVariant({ productId: product.id, name: 'Standard', stock: 10 })
+    const cart = await client.createCart({ userId: user.id })
+    await client.addItemToCart({ cartId: cart.id, variantId: variant.id, quantity: 2 })
+
+    // Spy / override clearCart to simulate downstream partition failure
+    const originalClearCart = client.clearCart.bind(client)
+    client.clearCart = async () => {
+      throw new Error('Simulated DB_CART connection crash')
+    }
+
+    await expect(client.checkoutCartToOrder(cart.id)).rejects.toThrow('Simulated DB_CART connection crash')
+
+    // Verify variant stock was rolled back to initial 10
+    const restoredVariant = await client.getVariant(variant.id)
+    expect(restoredVariant?.stock).toBe(10)
+
+    // Restore clearCart
+    client.clearCart = originalClearCart
+  })
+
+  it('enforces SQLite foreign key ON DELETE CASCADE when an order is deleted', async () => {
+    const client = createMultiD1Client(env)
+    const user = await client.createUser({ email: 'order_cascade@example.com', name: 'Order Cascade' })
+    const product = await client.createProduct({ name: 'Headphones', price: 9900 })
+    const variant = await client.createVariant({ productId: product.id, name: 'Black', stock: 10 })
+    const order = await client.createOrder({
+      userId: user.id,
+      items: [{ variantId: variant.id, quantity: 1, price: 9900 }],
+    })
+
+    expect(await client.getOrder(order.id)).not.toBeNull()
+
+    await env.DB_ORDERS.prepare('DELETE FROM orders WHERE id = ?').bind(order.id).run()
+
+    // Items should be cascade-deleted at SQLite DDL level
+    const orderItemsCount = await env.DB_ORDERS.prepare('SELECT COUNT(*) as c FROM order_items WHERE order_id = ?')
+      .bind(order.id)
+      .first<{ c: number }>()
+    expect(orderItemsCount?.c).toBe(0)
   })
 })

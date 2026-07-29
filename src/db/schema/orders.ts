@@ -50,22 +50,24 @@ export type OrderDetails = Order & {
 }
 
 export const CREATE_ORDERS_TABLES_SQL = `
+PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS orders (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY NOT NULL,
   user_id TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
+  status TEXT DEFAULT 'pending' NOT NULL,
   total_amount INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
-  id TEXT PRIMARY KEY,
-  order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY NOT NULL,
+  order_id TEXT NOT NULL,
   variant_id TEXT NOT NULL,
   quantity INTEGER NOT NULL,
   price INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON UPDATE NO ACTION ON DELETE CASCADE
 );
 `

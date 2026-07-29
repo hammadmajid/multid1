@@ -48,6 +48,7 @@ export interface Env {
 }
 
 export class MultiD1Client {
+  public env: Env
   public db: {
     users: DrizzleD1Database<typeof usersSchema>
     cart: DrizzleD1Database<typeof cartSchema>
@@ -57,6 +58,7 @@ export class MultiD1Client {
   }
 
   constructor(env: Env) {
+    this.env = env
     this.db = {
       users: drizzle(env.DB_USERS, { schema: usersSchema }),
       cart: drizzle(env.DB_CART, { schema: cartSchema }),
@@ -64,6 +66,47 @@ export class MultiD1Client {
       orders: drizzle(env.DB_ORDERS, { schema: ordersSchema }),
       reviews: drizzle(env.DB_REVIEWS, { schema: reviewsSchema }),
     }
+  }
+
+  async setBusyTimeout(partition: keyof Env, timeoutMs: number): Promise<void> {
+    const db = this.env[partition]
+    if (db) {
+      await db.prepare(`PRAGMA busy_timeout = ${timeoutMs};`).run()
+    }
+  }
+
+  async executeWithRetry<T>(
+    fn: () => Promise<T>,
+    maxRetries = 5,
+    initialDelayMs = 10
+  ): Promise<T> {
+    let attempt = 0
+    while (true) {
+      try {
+        return await fn()
+      } catch (err: any) {
+        const isBusy =
+          err?.message?.includes('SQLITE_BUSY') ||
+          err?.message?.includes('database is locked') ||
+          err?.cause?.message?.includes('SQLITE_BUSY') ||
+          err?.cause?.message?.includes('database is locked')
+
+        if (isBusy && attempt < maxRetries) {
+          attempt++
+          await new Promise((res) => setTimeout(res, initialDelayMs * Math.pow(2, attempt - 1)))
+          continue
+        }
+        throw err
+      }
+    }
+  }
+
+  async batch(partition: keyof Env, statements: D1PreparedStatement[]): Promise<D1Response[]> {
+    const db = this.env[partition]
+    if (!db) {
+      throw new Error(`Invalid D1 partition '${partition}'`)
+    }
+    return db.batch(statements)
   }
 
   // --- USER OPERATIONS ---

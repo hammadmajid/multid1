@@ -26,8 +26,9 @@ export type ReviewWithDetails = Review & {
 }
 
 export const CREATE_REVIEWS_TABLES_SQL = `
+PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS reviews (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY NOT NULL,
   user_id TEXT NOT NULL,
   product_id TEXT NOT NULL,
   rating INTEGER NOT NULL,

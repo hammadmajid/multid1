@@ -1,7 +1,6 @@
 import { env } from 'cloudflare:test'
 import { describe, it, expect, beforeEach } from 'vitest'
-import { createMultiD1Client, ReferentialIntegrityError } from '../src/db'
-import { CREATE_USERS_TABLES_SQL } from '../src/db/schema/users'
+import { createMultiD1Client, ReferentialIntegrityError, resetDatabases } from '../src/db'
 import { generateId, isValidId } from '../src/utils/ulid'
 
 describe('Prefixed ULID Generator', () => {
@@ -41,15 +40,8 @@ describe('Prefixed ULID Generator', () => {
 
 describe('User & Session Slice (MultiD1Client)', () => {
   beforeEach(async () => {
-    // Initialize SQLite tables in DB_USERS binding
-    const statements = CREATE_USERS_TABLES_SQL.split(';')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    for (const stmt of statements) {
-      await env.DB_USERS.prepare(stmt).run()
-    }
+    await resetDatabases(env)
   })
-
   it('creates and retrieves a user', async () => {
     const client = createMultiD1Client(env)
     const user = await client.createUser({
@@ -162,5 +154,22 @@ describe('User & Session Slice (MultiD1Client)', () => {
         expiresAt,
       })
     ).rejects.toThrow(ReferentialIntegrityError)
+  })
+
+  it('enforces SQLite foreign key ON DELETE CASCADE when a user is deleted', async () => {
+    const client = createMultiD1Client(env)
+    const user = await client.createUser({ email: 'cascade@example.com', name: 'Cascade User' })
+    const session = await client.createSession({
+      userId: user.id,
+      expiresAt: new Date(Date.now() + 86400 * 1000),
+    })
+
+    expect(await client.getSession(session.id)).not.toBeNull()
+
+    // Delete user from DB_USERS
+    await env.DB_USERS.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run()
+
+    // User session should be cascade deleted by SQLite
+    expect(await client.getSession(session.id)).toBeNull()
   })
 })

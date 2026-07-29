@@ -3,9 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   createMultiD1Client,
   ReferentialIntegrityError,
-  CREATE_USERS_TABLES_SQL,
-  CREATE_CATALOG_TABLES_SQL,
-  CREATE_REVIEWS_TABLES_SQL,
+  resetDatabases,
 } from '../src/db'
 import {
   generateId,
@@ -27,15 +25,7 @@ describe('Review Prefixed ULID Generator', () => {
 
 describe('Reviews Database & Cross-DB Joins (MultiD1Client)', () => {
   beforeEach(async () => {
-    for (const stmt of CREATE_USERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_USERS.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CATALOG_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CATALOG.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_REVIEWS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_REVIEWS.prepare(stmt).run()
-    }
+    await resetDatabases(env)
   })
 
   it('creates and retrieves a product review', async () => {

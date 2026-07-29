@@ -2,31 +2,13 @@ import { env } from 'cloudflare:test'
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
   createMultiD1Client,
-  CREATE_USERS_TABLES_SQL,
-  CREATE_CATALOG_TABLES_SQL,
-  CREATE_CART_TABLES_SQL,
-  CREATE_ORDERS_TABLES_SQL,
-  CREATE_REVIEWS_TABLES_SQL,
+  resetDatabases,
   type ProductVariant,
 } from '../src/db'
 
 describe('High-Concurrency Stress Suite & Single-Writer Isolation (Ticket 6)', () => {
   beforeEach(async () => {
-    for (const stmt of CREATE_USERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_USERS.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CATALOG_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CATALOG.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CART_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CART.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_ORDERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_ORDERS.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_REVIEWS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_REVIEWS.prepare(stmt).run()
-    }
+    await resetDatabases(env)
   })
 
   it('executes 200 concurrent operations on hot DB_CART with zero data corruption or orphans', async () => {
@@ -240,5 +222,61 @@ describe('High-Concurrency Stress Suite & Single-Writer Isolation (Ticket 6)', (
     const audit = await client.auditSystemIntegrity()
     expect(audit.isValid).toBe(true)
     expect(audit.totalOrphanedCount).toBe(0)
+  })
+
+  it('demonstrates D1 architectural rejection of traditional SQL transaction statements (BEGIN / SAVEPOINT)', async () => {
+    const client = createMultiD1Client(env)
+
+    // D1 explicitly disallows raw SQL transaction statements (BEGIN TRANSACTION / EXCLUSIVE / SAVEPOINT)
+    await expect(env.DB_CART.prepare('BEGIN TRANSACTION;').run()).rejects.toThrow(
+      /To execute a transaction, please use/i
+    )
+    await expect(env.DB_CART.prepare('BEGIN EXCLUSIVE TRANSACTION;').run()).rejects.toThrow(
+      /To execute a transaction, please use/i
+    )
+  })
+
+  it('demonstrates D1 authorization rejection of PRAGMA busy_timeout configuration', async () => {
+    // D1 blocks raw PRAGMA execution via SQL authorizer
+    await expect(env.DB_CART.prepare('PRAGMA busy_timeout = 0;').run()).rejects.toThrow(
+      /SQLITE_AUTH/i
+    )
+  })
+
+  it('recovers from SQLITE_BUSY / database locked errors using executeWithRetry exponential backoff', async () => {
+    const client = createMultiD1Client(env)
+    let attempts = 0
+
+    // Simulate transient D1 SQLITE_BUSY error on first 2 calls, then succeed
+    const simulatedD1BusyOperation = async () => {
+      attempts++
+      if (attempts <= 2) {
+        throw new Error('D1_ERROR: SQLITE_BUSY: database is locked')
+      }
+      return client.createCart()
+    }
+
+    const cart = await client.executeWithRetry(simulatedD1BusyOperation, 5, 5)
+    expect(cart.id).toMatch(/^crt_/)
+    expect(attempts).toBe(3)
+  })
+
+  it('executes atomic D1 batch operations using env.DB.batch to reduce RPC turnarounds', async () => {
+    const client = createMultiD1Client(env)
+    const cart = await client.createCart()
+    const stmts = [
+      env.DB_CART.prepare(
+        'INSERT INTO cart_items (id, cart_id, variant_id, quantity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind('cit_b1', cart.id, 'var_1', 2, Date.now(), Date.now()),
+      env.DB_CART.prepare(
+        'INSERT INTO cart_items (id, cart_id, variant_id, quantity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind('cit_b2', cart.id, 'var_2', 1, Date.now(), Date.now()),
+    ]
+
+    const batchResults = await client.batch('DB_CART', stmts)
+    expect(batchResults.length).toBe(2)
+
+    const cartWithItems = await client.getCartWithItems(cart.id)
+    expect(cartWithItems?.items.length).toBe(2)
   })
 })

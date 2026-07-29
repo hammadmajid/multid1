@@ -2,30 +2,12 @@ import { env } from 'cloudflare:test'
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
   createMultiD1Client,
-  CREATE_USERS_TABLES_SQL,
-  CREATE_CATALOG_TABLES_SQL,
-  CREATE_CART_TABLES_SQL,
-  CREATE_ORDERS_TABLES_SQL,
-  CREATE_REVIEWS_TABLES_SQL,
+  resetDatabases,
 } from '../src/db'
 
 describe('Automated System Audit Utility (auditSystemIntegrity)', () => {
   beforeEach(async () => {
-    for (const stmt of CREATE_USERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_USERS.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CATALOG_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CATALOG.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_CART_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_CART.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_ORDERS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_ORDERS.prepare(stmt).run()
-    }
-    for (const stmt of CREATE_REVIEWS_TABLES_SQL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      await env.DB_REVIEWS.prepare(stmt).run()
-    }
+    await resetDatabases(env)
   })
 
   it('returns valid system audit with zero orphans for empty databases', async () => {

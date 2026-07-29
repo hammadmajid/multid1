@@ -41,8 +41,9 @@ export type ProductWithVariants = Product & {
 }
 
 export const CREATE_CATALOG_TABLES_SQL = `
+PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS products (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
   description TEXT,
   price INTEGER NOT NULL,
@@ -52,13 +53,14 @@ CREATE TABLE IF NOT EXISTS products (
 );
 
 CREATE TABLE IF NOT EXISTS product_variants (
-  id TEXT PRIMARY KEY,
-  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY NOT NULL,
+  product_id TEXT NOT NULL,
   name TEXT NOT NULL,
   sku TEXT,
   price INTEGER,
-  stock INTEGER NOT NULL DEFAULT 0,
+  stock INTEGER DEFAULT 0 NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (product_id) REFERENCES products(id) ON UPDATE NO ACTION ON DELETE CASCADE
 );
 `
